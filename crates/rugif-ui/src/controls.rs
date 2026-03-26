@@ -94,15 +94,11 @@ impl eframe::App for ControlsApp {
                 });
             });
 
-        // Handle Escape
+        // Handle Escape only when this window has focus
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.stop_flag.store(true, Ordering::Relaxed);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-
-        // Keep window focused and on top — prevents it from going behind
-        // other windows when the user clicks elsewhere.
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 
         // Repaint to update the timer
         ctx.request_repaint();
