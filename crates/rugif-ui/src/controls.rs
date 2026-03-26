@@ -100,6 +100,10 @@ impl eframe::App for ControlsApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
+        // Keep window focused and on top — prevents it from going behind
+        // other windows when the user clicks elsewhere.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+
         // Repaint to update the timer
         ctx.request_repaint();
     }

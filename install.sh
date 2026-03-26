@@ -50,10 +50,20 @@ fi
 
 # --- Detect display server ---
 
-FEATURES=""
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+detect_wayland() {
+  [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && return 0
+  [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+  # Check if a Wayland compositor is running
+  loginctl show-session "$(loginctl | grep "$(whoami)" | awk '{print $1}' | head -1)" -p Type 2>/dev/null | grep -q "wayland" && return 0
+  # Check for common Wayland socket
+  [ -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ] && return 0
+  return 1
+}
+
+USE_WAYLAND=false
+if detect_wayland; then
   echo "Detected: Wayland"
-  FEATURES="--features wayland"
+  USE_WAYLAND=true
 elif [ -n "${DISPLAY:-}" ]; then
   echo "Detected: X11"
 else
@@ -64,7 +74,11 @@ fi
 
 echo
 echo "Building rugif (this may take a few minutes)..."
-cargo install --git "https://github.com/$REPO" --bin rugif $FEATURES
+if [ "$USE_WAYLAND" = true ]; then
+  cargo install --git "https://github.com/$REPO" --bin rugif --features wayland
+else
+  cargo install --git "https://github.com/$REPO" --bin rugif
+fi
 
 RUGIF_BIN="$(which rugif)"
 echo "Installed: $RUGIF_BIN"
