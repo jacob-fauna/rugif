@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+rugif-core = { path = "crates/rugif-core" }
+rugif-capture = { path = "crates/rugif-capture" }
+rugif-encode = { path = "crates/rugif-encode" }
+rugif-ui = { path = "crates/rugif-ui" }
+
+error-stack = "0.5"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+lto = "fat"
+strip = true
+panic = "abort"
+codegen-units = 1

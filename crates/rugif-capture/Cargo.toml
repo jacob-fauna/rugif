@@ -1,0 +1,26 @@
+[package]
+name = "rugif-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["x11"]
+x11 = ["dep:x11rb", "dep:libc"]
+wayland = ["dep:ashpd", "dep:pipewire", "dep:libspa", "dep:enumflags2", "dep:tokio", "dep:image", "dep:url"]
+
+[dependencies]
+rugif-core.workspace = true
+error-stack.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+x11rb = { version = "0.13", features = ["shm", "randr"], optional = true }
+libc = { version = "0.2", optional = true }
+ashpd = { version = "0.13", features = ["screencast", "screenshot"], optional = true }
+pipewire = { version = "0.9", optional = true }
+libspa = { version = "0.9", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+url = { version = "2", optional = true }
+enumflags2 = { version = "0.7", optional = true }

@@ -1,0 +1,12 @@
+[package]
+name = "rugif-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+error-stack.workspace = true
+thiserror.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "6"

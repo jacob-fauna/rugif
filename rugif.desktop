@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=rugif
+Comment=GIF screen recorder — runs in system tray
+Exec=rugif --tray
+Icon=rugif
+Terminal=false
+Categories=Utility;Graphics;Video;
+Keywords=gif;record;screen;capture;snip;

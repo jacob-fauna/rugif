@@ -1,0 +1,26 @@
+[package]
+name = "rugif"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rugif"
+path = "src/main.rs"
+
+[features]
+default = []
+wayland = ["rugif-capture/wayland"]
+
+[dependencies]
+rugif-core.workspace = true
+rugif-capture = { workspace = true }
+rugif-encode.workspace = true
+rugif-ui.workspace = true
+error-stack.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+ksni = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }

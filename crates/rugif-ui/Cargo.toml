@@ -1,0 +1,15 @@
+[package]
+name = "rugif-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rugif-core.workspace = true
+rugif-capture.workspace = true
+error-stack.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11"] }
+egui = "0.31"
+winit = { version = "0.30", default-features = false, features = ["wayland", "x11"] }

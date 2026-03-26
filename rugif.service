@@ -1,0 +1,13 @@
+[Unit]
+Description=rugif GIF screen recorder (tray mode)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=rugif --tray
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

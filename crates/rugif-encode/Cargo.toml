@@ -1,0 +1,12 @@
+[package]
+name = "rugif-encode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rugif-core.workspace = true
+error-stack.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+gifski = "1"
