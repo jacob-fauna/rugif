@@ -19,7 +19,7 @@ A fast, self-contained GIF screen recorder for Linux with a snipping-tool-style 
 ### One-liner
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/USER/rugif/master/install.sh | bash
+curl -sSf https://raw.githubusercontent.com/jacob-fauna/rugif/master/install.sh | bash
 ```
 
 This will check dependencies, build from source, install the binary, set up the desktop entry and icon, and optionally enable start-on-login.
@@ -39,7 +39,7 @@ sudo apt install pkg-config libpipewire-0.3-dev libclang-dev
 **Build and install:**
 
 ```bash
-git clone https://github.com/USER/rugif.git
+git clone https://github.com/jacob-fauna/rugif.git
 cd rugif
 
 # Wayland (recommended — also supports XWayland)
@@ -71,7 +71,7 @@ systemctl --user enable rugif --now
 ### Uninstall
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/USER/rugif/master/uninstall.sh | bash
+curl -sSf https://raw.githubusercontent.com/jacob-fauna/rugif/master/uninstall.sh | bash
 ```
 
 Or manually:

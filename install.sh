@@ -4,7 +4,7 @@ set -euo pipefail
 # rugif installer
 # Usage: curl -sSf https://raw.githubusercontent.com/USER/rugif/master/install.sh | bash
 
-REPO="USER/rugif"
+REPO="jacob-fauna/rugif"
 RAW="https://raw.githubusercontent.com/$REPO/master"
 
 echo "=== rugif installer ==="
