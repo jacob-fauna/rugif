@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# rugif installer
-# Usage: curl -sSf https://raw.githubusercontent.com/USER/rugif/master/install.sh | bash
+# rugif installer — safe to run multiple times (idempotent)
+# Usage: curl -sSf https://raw.githubusercontent.com/jacob-fauna/rugif/master/install.sh | bash
 
 REPO="jacob-fauna/rugif"
 RAW="https://raw.githubusercontent.com/$REPO/master"
@@ -53,9 +53,7 @@ fi
 detect_wayland() {
   [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && return 0
   [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
-  # Check if a Wayland compositor is running
   loginctl show-session "$(loginctl | grep "$(whoami)" | awk '{print $1}' | head -1)" -p Type 2>/dev/null | grep -q "wayland" && return 0
-  # Check for common Wayland socket
   [ -e "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ] && return 0
   return 1
 }
@@ -70,14 +68,24 @@ else
   echo "WARNING: Could not detect display server. Building with X11 support only."
 fi
 
+# --- Stop existing instance before upgrading ---
+
+if systemctl --user is-active rugif &>/dev/null 2>&1; then
+  echo "Stopping existing rugif service..."
+  systemctl --user stop rugif
+fi
+
+# Kill any running tray instances
+pkill -f 'rugif --tray' 2>/dev/null || true
+
 # --- Install binary ---
 
 echo
 echo "Building rugif (this may take a few minutes)..."
 if [ "$USE_WAYLAND" = true ]; then
-  cargo install --git "https://github.com/$REPO" --bin rugif --features wayland
+  cargo install --git "https://github.com/$REPO" --bin rugif --features wayland --force
 else
-  cargo install --git "https://github.com/$REPO" --bin rugif
+  cargo install --git "https://github.com/$REPO" --bin rugif --force
 fi
 
 RUGIF_BIN="$(which rugif)"
@@ -91,13 +99,21 @@ ICON_DIR="$HOME/.local/share/icons/hicolor/128x128/apps"
 mkdir -p "$ICON_DIR"
 curl -sSf "$RAW/assets/rugif.png" -o "$ICON_DIR/rugif.png"
 
-# --- Desktop entry ---
+# --- Desktop entry (always write fresh from template) ---
 
 echo "Installing desktop entry..."
 mkdir -p ~/.local/share/applications
-curl -sSf "$RAW/rugif.desktop" -o ~/.local/share/applications/rugif.desktop
-sed -i "s|Exec=rugif|Exec=$RUGIF_BIN|g" ~/.local/share/applications/rugif.desktop
-sed -i "s|Icon=camera-video|Icon=$ICON_DIR/rugif.png|g" ~/.local/share/applications/rugif.desktop
+cat > ~/.local/share/applications/rugif.desktop <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=rugif
+Comment=GIF screen recorder — runs in system tray
+Exec=$RUGIF_BIN --tray
+Icon=$ICON_DIR/rugif.png
+Terminal=false
+Categories=Utility;Graphics;Video;
+Keywords=gif;record;screen;capture;snip;
+DESKTOP
 
 # --- Start on login ---
 
@@ -109,8 +125,21 @@ STARTED=false
 # Method 1: systemd user service (preferred)
 if command -v systemctl &>/dev/null && systemctl --user status &>/dev/null 2>&1; then
   mkdir -p ~/.config/systemd/user
-  curl -sSf "$RAW/rugif.service" -o ~/.config/systemd/user/rugif.service
-  sed -i "s|ExecStart=rugif|ExecStart=$RUGIF_BIN|g" ~/.config/systemd/user/rugif.service
+  cat > ~/.config/systemd/user/rugif.service <<SERVICE
+[Unit]
+Description=rugif GIF screen recorder (tray mode)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=$RUGIF_BIN --tray
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+SERVICE
 
   systemctl --user daemon-reload
   systemctl --user enable rugif --now
