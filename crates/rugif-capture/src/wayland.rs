@@ -286,7 +286,7 @@ fn extract_full_frame(raw: &[u8], width: u32, height: u32) -> CaptureFrame {
 /// Capture frames continuously from PipeWire into a channel.
 ///
 /// PipeWire only delivers frames on screen damage. To produce a consistent
-/// framerate, we store the latest frame and re-send it at the target FPS
+/// framerate, we cache the latest raw buffer and re-send it at the target FPS
 /// even when the screen is static.
 fn run_pipewire_capture(
     node_id: u32,
@@ -317,10 +317,10 @@ fn run_pipewire_capture(
     let stream =
         pw::stream::StreamRc::new(core, "rugif-capture", props).expect("failed to create stream");
 
-    // Shared latest frame — process callback updates it, main loop sends it.
-    let latest_frame: Arc<std::sync::Mutex<Option<CaptureFrame>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    let latest_for_process = latest_frame.clone();
+    // The process callback sends frames directly through a separate channel.
+    // The main loop then forwards them to the encoder at the target FPS,
+    // repeating the last frame when the screen is static.
+    let (pw_tx, pw_rx) = mpsc::channel::<CaptureFrame>();
 
     let _listener = stream
         .add_local_listener_with_user_data(())
@@ -336,7 +336,7 @@ fn run_pipewire_capture(
                         if let Some(raw) = data.data() {
                             let usable = raw.len().min(size);
                             let frame = crop_frame(&raw[..usable], screen_width, region);
-                            *latest_for_process.lock().unwrap() = Some(frame);
+                            let _ = pw_tx.send(frame);
                         }
                     }
                 }
@@ -347,31 +347,45 @@ fn run_pipewire_capture(
 
     connect_pw_stream(&stream, node_id, screen_width, screen_height);
 
-    // Main capture loop: iterate PipeWire to process incoming frames, then
-    // send the latest frame at the target FPS. This ensures a consistent
-    // framerate even when the screen is static (no PipeWire damage events).
+    // Frame forwarding loop on a separate thread: takes frames from PipeWire
+    // and sends to the encoder at a steady FPS, repeating the last frame
+    // when the screen is static.
+    let stop_for_fwd = stop_flag.clone();
     let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
-    let loop_ = mainloop.loop_();
-    let mut last_send = Instant::now();
-    let mut frames_sent = 0u64;
 
-    while !stop_flag.load(Ordering::Relaxed) {
-        // Process PipeWire events (may update latest_frame).
-        loop_.iterate(Duration::from_millis(10));
+    let fwd_handle = std::thread::spawn(move || {
+        let mut last_frame: Option<CaptureFrame> = None;
+        let mut frames_sent = 0u64;
 
-        let now = Instant::now();
-        if now.duration_since(last_send) >= frame_interval {
-            if let Some(frame) = latest_frame.lock().unwrap().clone() {
-                if tx.try_send(frame).is_err() {
-                    break; // channel full or closed
+        while !stop_for_fwd.load(Ordering::Relaxed) {
+            // Drain any new frames from PipeWire (non-blocking).
+            while let Ok(frame) = pw_rx.try_recv() {
+                last_frame = Some(frame);
+            }
+
+            // Send a frame at the target interval.
+            if let Some(ref frame) = last_frame {
+                let mut send_frame = frame.clone();
+                send_frame.timestamp = Instant::now();
+                if tx.try_send(send_frame).is_err() {
+                    break;
                 }
                 frames_sent += 1;
             }
-            last_send = now;
+
+            thread::sleep(frame_interval);
         }
+
+        tracing::info!("PipeWire capture: sent {frames_sent} frames");
+    });
+
+    // Run PipeWire event loop until stopped.
+    let loop_ = mainloop.loop_();
+    while !stop_flag.load(Ordering::Relaxed) {
+        loop_.iterate(Duration::from_millis(50));
     }
 
-    tracing::info!("PipeWire capture: sent {frames_sent} frames");
+    fwd_handle.join().ok();
 }
 
 /// Crop a full-screen BGRA frame to the selected region, converting to RGBA.

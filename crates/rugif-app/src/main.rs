@@ -1,10 +1,10 @@
 mod tray;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use rugif_core::config::Settings;
@@ -40,6 +40,14 @@ struct Args {
     /// Open the settings window
     #[arg(long)]
     settings: bool,
+
+    /// Internal: show recording controls at x,y and write "stop" to a file when done
+    #[arg(long, hide = true)]
+    stop_ui: Option<String>,
+
+    /// Internal: show region selection overlay, write result to file
+    #[arg(long, hide = true)]
+    select_region: Option<String>,
 }
 
 fn parse_region(s: &str) -> Result<Region, String> {
@@ -81,6 +89,67 @@ fn main() {
                 tracing::error!("settings error: {e}");
                 std::process::exit(1);
             }
+        }
+        return;
+    }
+
+    // Internal: selection overlay subprocess — writes region to a file.
+    if let Some(ref result_path) = args.select_region {
+        let screenshot_path = format!("{result_path}.screenshot");
+        let screenshot_data = std::fs::read(&screenshot_path).unwrap_or_default();
+        // First 8 bytes: width (u32 LE) + height (u32 LE), rest is RGBA data
+        if screenshot_data.len() > 8 {
+            let width = u32::from_le_bytes(screenshot_data[0..4].try_into().unwrap());
+            let height = u32::from_le_bytes(screenshot_data[4..8].try_into().unwrap());
+            let pixels = screenshot_data[8..].to_vec();
+
+            match rugif_ui::selection::select_region(pixels, width, height) {
+                Ok(rugif_ui::selection::SelectionResult::Selected(r)) => {
+                    let _ = std::fs::write(
+                        result_path,
+                        format!("{},{},{},{}", r.x, r.y, r.width, r.height),
+                    );
+                }
+                Ok(rugif_ui::selection::SelectionResult::Cancelled) => {
+                    let _ = std::fs::write(result_path, "cancelled");
+                }
+                Err(e) => {
+                    tracing::error!("selection error: {e}");
+                    let _ = std::fs::write(result_path, "error");
+                }
+            }
+            let _ = std::fs::remove_file(&screenshot_path);
+        }
+        return;
+    }
+
+    // Internal: controls subprocess writes to a file when the user clicks Stop.
+    if let Some(ref pipe_info) = args.stop_ui {
+        let parts: Vec<&str> = pipe_info.split(',').collect();
+        if parts.len() == 3 {
+            let x: i32 = parts[0].parse().unwrap_or(100);
+            let y: i32 = parts[1].parse().unwrap_or(100);
+            let pipe_path = parts[2].to_string();
+
+            // Auto-exit if parent process dies.
+            let parent_pid = std::os::unix::process::parent_id();
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let stop_for_monitor = stop_flag.clone();
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_millis(500));
+                    // On Linux, orphaned processes get reparented to PID 1.
+                    if std::os::unix::process::parent_id() != parent_pid {
+                        stop_for_monitor.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Write stop file so parent (if somehow still around) knows.
+                        let _ = std::fs::write(&pipe_path, "stop");
+                        std::process::exit(0);
+                    }
+                }
+            });
+
+            let _ = rugif_ui::controls::show_recording_controls(stop_flag, x, y);
+            let _ = std::fs::write(parts[2], "stop");
         }
         return;
     }
@@ -157,16 +226,47 @@ pub fn record(
             screenshot.data.len()
         );
 
-        match rugif_ui::selection::select_region(
-            screenshot.data,
-            screenshot.width,
-            screenshot.height,
-        )? {
-            rugif_ui::selection::SelectionResult::Selected(r) => r,
-            rugif_ui::selection::SelectionResult::Cancelled => {
-                tracing::info!("selection cancelled");
-                return Ok(());
-            }
+        // Run selection overlay as a subprocess to avoid freezing the
+        // compositor (fullscreen egui window + Wayland = "not responding").
+        let result_file = std::env::temp_dir().join(format!("rugif_sel_{}", std::process::id()));
+        let screenshot_file = format!("{}.screenshot", result_file.display());
+        let _ = std::fs::remove_file(&result_file);
+
+        // Write screenshot to temp file: [width:4][height:4][rgba...]
+        let mut screenshot_blob = Vec::with_capacity(8 + screenshot.data.len());
+        screenshot_blob.extend_from_slice(&screenshot.width.to_le_bytes());
+        screenshot_blob.extend_from_slice(&screenshot.height.to_le_bytes());
+        screenshot_blob.extend_from_slice(&screenshot.data);
+        std::fs::write(&screenshot_file, &screenshot_blob)?;
+
+        let exe = std::env::current_exe().unwrap_or_else(|_| "rugif".into());
+        let mut child = std::process::Command::new(&exe)
+            .arg("--select-region")
+            .arg(result_file.to_str().unwrap())
+            .spawn()?;
+
+        // Wait for the selection subprocess to finish.
+        child.wait()?;
+
+        // Read the result.
+        let result_str = std::fs::read_to_string(&result_file).unwrap_or_default();
+        let _ = std::fs::remove_file(&result_file);
+
+        if result_str == "cancelled" || result_str == "error" || result_str.is_empty() {
+            tracing::info!("selection cancelled");
+            return Ok(());
+        }
+
+        // Parse "x,y,width,height"
+        let parts: Vec<&str> = result_str.trim().split(',').collect();
+        if parts.len() != 4 {
+            return Err(format!("invalid selection result: {result_str}").into());
+        }
+        Region {
+            x: parts[0].parse()?,
+            y: parts[1].parse()?,
+            width: parts[2].parse()?,
+            height: parts[3].parse()?,
         }
     };
 
@@ -178,26 +278,20 @@ pub fn record(
         region.y
     );
 
-    // Wait for any window animations to settle before starting capture.
-    // Without this, PipeWire captures the selection overlay closing.
-    thread::sleep(Duration::from_millis(500));
+    // Spawn the recording controls as a separate process to avoid winit's
+    // "one event loop per process" limitation.
+    let stop_file = std::env::temp_dir().join(format!("rugif_stop_{}", std::process::id()));
+    let _ = std::fs::remove_file(&stop_file);
 
-    // Show recording controls FIRST, then start capture — so the controls
-    // window is already placed before frames start being grabbed.
-    // We need to run the controls window in a separate thread since it blocks.
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let controls_stop = stop_flag.clone();
-    let ctrl_x = region.x;
-    let ctrl_y = region.y;
-    let controls_handle = thread::spawn(move || {
-        rugif_ui::controls::show_recording_controls(controls_stop, ctrl_x, ctrl_y)
-            .map_err(|e| e.to_string())
-    });
+    let exe = std::env::current_exe().unwrap_or_else(|_| "rugif".into());
+    let stop_ui_arg = format!("{},{},{}", region.x, region.y, stop_file.display());
+    let mut controls_child = std::process::Command::new(&exe)
+        .arg("--stop-ui")
+        .arg(&stop_ui_arg)
+        .spawn()?;
 
-    // Small delay for controls window to appear before capture starts.
-    thread::sleep(Duration::from_millis(300));
-
-    // Start capturing frames.
+    // Start capturing frames immediately. The first ~0.5s of frames may
+    // include window transition artifacts — we skip those in the encoder.
     let receiver = capture.start_capture(region, config.fps)?;
     tracing::info!(
         "recording started (max {}s, {} fps)",
@@ -216,19 +310,34 @@ pub fn record(
         rugif_encode::encode_gif(receiver, &output_path, encode_fps, encode_quality, width, height)
     });
 
-    // Auto-stop timer.
+    // Wait for the controls subprocess to exit (user clicked Stop/Escape)
+    // or auto-stop after max duration.
     let max_dur = Duration::from_secs(config.max_duration_secs as u64);
-    let timer_stop = stop_flag.clone();
-    thread::spawn(move || {
-        thread::sleep(max_dur);
-        timer_stop.store(true, Ordering::Relaxed);
-    });
+    let deadline = Instant::now() + max_dur;
 
-    // Wait for controls window to close (user clicked Stop or Escape).
-    controls_handle
-        .join()
-        .map_err(|_| "controls thread panicked")?
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    loop {
+        // Check if controls process exited.
+        match controls_child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        // Check if stop file was written.
+        if stop_file.exists() {
+            break;
+        }
+        // Check max duration.
+        if Instant::now() >= deadline {
+            let _ = controls_child.kill();
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Clean up.
+    let _ = controls_child.kill();
+    let _ = controls_child.wait();
+    let _ = std::fs::remove_file(&stop_file);
 
     // Stop capture — this drops the sender, signaling the encoder to finalize.
     tracing::info!("stopping capture...");
