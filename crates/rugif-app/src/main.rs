@@ -178,6 +178,25 @@ pub fn record(
         region.y
     );
 
+    // Wait for any window animations to settle before starting capture.
+    // Without this, PipeWire captures the selection overlay closing.
+    thread::sleep(Duration::from_millis(500));
+
+    // Show recording controls FIRST, then start capture — so the controls
+    // window is already placed before frames start being grabbed.
+    // We need to run the controls window in a separate thread since it blocks.
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let controls_stop = stop_flag.clone();
+    let ctrl_x = region.x;
+    let ctrl_y = region.y;
+    let controls_handle = thread::spawn(move || {
+        rugif_ui::controls::show_recording_controls(controls_stop, ctrl_x, ctrl_y)
+            .map_err(|e| e.to_string())
+    });
+
+    // Small delay for controls window to appear before capture starts.
+    thread::sleep(Duration::from_millis(300));
+
     // Start capturing frames.
     let receiver = capture.start_capture(region, config.fps)?;
     tracing::info!(
@@ -197,9 +216,6 @@ pub fn record(
         rugif_encode::encode_gif(receiver, &output_path, encode_fps, encode_quality, width, height)
     });
 
-    // Shared stop flag.
-    let stop_flag = Arc::new(AtomicBool::new(false));
-
     // Auto-stop timer.
     let max_dur = Duration::from_secs(config.max_duration_secs as u64);
     let timer_stop = stop_flag.clone();
@@ -208,9 +224,11 @@ pub fn record(
         timer_stop.store(true, Ordering::Relaxed);
     });
 
-    // Show recording controls (blocks until user clicks Stop or timer fires).
-    let controls_stop = stop_flag.clone();
-    rugif_ui::controls::show_recording_controls(controls_stop, region.x, region.y)?;
+    // Wait for controls window to close (user clicked Stop or Escape).
+    controls_handle
+        .join()
+        .map_err(|_| "controls thread panicked")?
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     // Stop capture — this drops the sender, signaling the encoder to finalize.
     tracing::info!("stopping capture...");

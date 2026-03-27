@@ -284,6 +284,10 @@ fn extract_full_frame(raw: &[u8], width: u32, height: u32) -> CaptureFrame {
 }
 
 /// Capture frames continuously from PipeWire into a channel.
+///
+/// PipeWire only delivers frames on screen damage. To produce a consistent
+/// framerate, we store the latest frame and re-send it at the target FPS
+/// even when the screen is static.
 fn run_pipewire_capture(
     node_id: u32,
     region: Region,
@@ -313,20 +317,17 @@ fn run_pipewire_capture(
     let stream =
         pw::stream::StreamRc::new(core, "rugif-capture", props).expect("failed to create stream");
 
-    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
+    // Shared latest frame — process callback updates it, main loop sends it.
+    let latest_frame: Arc<std::sync::Mutex<Option<CaptureFrame>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let latest_for_process = latest_frame.clone();
 
     let _listener = stream
-        .add_local_listener_with_user_data(Instant::now())
+        .add_local_listener_with_user_data(())
         .state_changed(|_stream, _user_data, _old, new| {
             tracing::debug!("PipeWire stream state: {new:?}");
         })
-        .process(move |stream, last_frame_time| {
-            let now = Instant::now();
-            if now.duration_since(*last_frame_time) < frame_interval {
-                return;
-            }
-            *last_frame_time = now;
-
+        .process(move |stream, _user_data| {
             if let Some(mut buffer) = stream.dequeue_buffer() {
                 let datas = buffer.datas_mut();
                 if let Some(data) = datas.first_mut() {
@@ -335,7 +336,7 @@ fn run_pipewire_capture(
                         if let Some(raw) = data.data() {
                             let usable = raw.len().min(size);
                             let frame = crop_frame(&raw[..usable], screen_width, region);
-                            let _ = tx.try_send(frame);
+                            *latest_for_process.lock().unwrap() = Some(frame);
                         }
                     }
                 }
@@ -346,12 +347,31 @@ fn run_pipewire_capture(
 
     connect_pw_stream(&stream, node_id, screen_width, screen_height);
 
-    // Manual loop: iterate with 100ms timeout so we can check the stop flag
-    // even when PipeWire isn't delivering frames (e.g. static screen).
+    // Main capture loop: iterate PipeWire to process incoming frames, then
+    // send the latest frame at the target FPS. This ensures a consistent
+    // framerate even when the screen is static (no PipeWire damage events).
+    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
     let loop_ = mainloop.loop_();
+    let mut last_send = Instant::now();
+    let mut frames_sent = 0u64;
+
     while !stop_flag.load(Ordering::Relaxed) {
-        loop_.iterate(Duration::from_millis(100));
+        // Process PipeWire events (may update latest_frame).
+        loop_.iterate(Duration::from_millis(10));
+
+        let now = Instant::now();
+        if now.duration_since(last_send) >= frame_interval {
+            if let Some(frame) = latest_frame.lock().unwrap().clone() {
+                if tx.try_send(frame).is_err() {
+                    break; // channel full or closed
+                }
+                frames_sent += 1;
+            }
+            last_send = now;
+        }
     }
+
+    tracing::info!("PipeWire capture: sent {frames_sent} frames");
 }
 
 /// Crop a full-screen BGRA frame to the selected region, converting to RGBA.
