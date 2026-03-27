@@ -1,8 +1,6 @@
 mod tray;
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,9 +39,9 @@ struct Args {
     #[arg(long)]
     settings: bool,
 
-    /// Internal: show recording controls at x,y and write "stop" to a file when done
+    /// Internal: stop file path — recording stops when this file appears
     #[arg(long, hide = true)]
-    stop_ui: Option<String>,
+    stop_file: Option<PathBuf>,
 
     /// Internal: show region selection overlay, write result to file
     #[arg(long, hide = true)]
@@ -123,37 +121,6 @@ fn main() {
         return;
     }
 
-    // Internal: controls subprocess writes to a file when the user clicks Stop.
-    if let Some(ref pipe_info) = args.stop_ui {
-        let parts: Vec<&str> = pipe_info.split(',').collect();
-        if parts.len() == 3 {
-            let x: i32 = parts[0].parse().unwrap_or(100);
-            let y: i32 = parts[1].parse().unwrap_or(100);
-            let pipe_path = parts[2].to_string();
-
-            // Auto-exit if parent process dies.
-            let parent_pid = std::os::unix::process::parent_id();
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_for_monitor = stop_flag.clone();
-            thread::spawn(move || {
-                loop {
-                    thread::sleep(Duration::from_millis(500));
-                    // On Linux, orphaned processes get reparented to PID 1.
-                    if std::os::unix::process::parent_id() != parent_pid {
-                        stop_for_monitor.store(true, std::sync::atomic::Ordering::Relaxed);
-                        // Write stop file so parent (if somehow still around) knows.
-                        let _ = std::fs::write(&pipe_path, "stop");
-                        std::process::exit(0);
-                    }
-                }
-            });
-
-            let _ = rugif_ui::controls::show_recording_controls(stop_flag, x, y);
-            let _ = std::fs::write(parts[2], "stop");
-        }
-        return;
-    }
-
     // Direct recording mode.
     let display_server = match DisplayServer::detect() {
         Some(ds) => {
@@ -169,7 +136,7 @@ fn main() {
     let settings = Settings::load();
     let config = build_config(&args, &settings);
 
-    if let Err(e) = record(display_server, config, args.region) {
+    if let Err(e) = record(display_server, config, args.region, args.stop_file.as_deref(), &settings) {
         tracing::error!("fatal: {e:?}");
         std::process::exit(1);
     }
@@ -201,10 +168,49 @@ fn chrono_timestamp() -> String {
     format!("{}", now.as_secs())
 }
 
+fn copy_to_clipboard(path: &std::path::Path) {
+    // Try wl-copy (Wayland) first, then xclip (X11).
+    let gif_data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("clipboard: failed to read GIF: {e}");
+            return;
+        }
+    };
+
+    let result = std::process::Command::new("wl-copy")
+        .arg("--type")
+        .arg("image/gif")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .or_else(|_| {
+            std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-t", "image/gif"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+        });
+
+    match result {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(&gif_data);
+            }
+            let _ = child.wait();
+            tracing::info!("copied GIF to clipboard");
+        }
+        Err(_) => {
+            tracing::warn!("clipboard: wl-copy and xclip not found, skipping");
+        }
+    }
+}
+
 pub fn record(
     display_server: DisplayServer,
     config: RecordingConfig,
     cli_region: Option<Region>,
+    stop_file: Option<&std::path::Path>,
+    settings: &Settings,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Ensure save directory exists.
     if let Some(parent) = config.output_path.parent() {
@@ -278,20 +284,7 @@ pub fn record(
         region.y
     );
 
-    // Spawn the recording controls as a separate process to avoid winit's
-    // "one event loop per process" limitation.
-    let stop_file = std::env::temp_dir().join(format!("rugif_stop_{}", std::process::id()));
-    let _ = std::fs::remove_file(&stop_file);
-
-    let exe = std::env::current_exe().unwrap_or_else(|_| "rugif".into());
-    let stop_ui_arg = format!("{},{},{}", region.x, region.y, stop_file.display());
-    let mut controls_child = std::process::Command::new(&exe)
-        .arg("--stop-ui")
-        .arg(&stop_ui_arg)
-        .spawn()?;
-
-    // Start capturing frames immediately. The first ~0.5s of frames may
-    // include window transition artifacts — we skip those in the encoder.
+    // Start capturing frames immediately.
     let receiver = capture.start_capture(region, config.fps)?;
     tracing::info!(
         "recording started (max {}s, {} fps)",
@@ -310,34 +303,25 @@ pub fn record(
         rugif_encode::encode_gif(receiver, &output_path, encode_fps, encode_quality, width, height)
     });
 
-    // Wait for the controls subprocess to exit (user clicked Stop/Escape)
-    // or auto-stop after max duration.
+    // Wait for stop signal: either the tray writes the stop file, or max
+    // duration is reached. If no stop file was provided (direct CLI mode),
+    // just wait for max duration.
     let max_dur = Duration::from_secs(config.max_duration_secs as u64);
     let deadline = Instant::now() + max_dur;
 
     loop {
-        // Check if controls process exited.
-        match controls_child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(_) => break,
+        if let Some(sf) = stop_file {
+            if sf.exists() {
+                let _ = std::fs::remove_file(sf);
+                break;
+            }
         }
-        // Check if stop file was written.
-        if stop_file.exists() {
-            break;
-        }
-        // Check max duration.
         if Instant::now() >= deadline {
-            let _ = controls_child.kill();
+            tracing::info!("max duration reached");
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
-
-    // Clean up.
-    let _ = controls_child.kill();
-    let _ = controls_child.wait();
-    let _ = std::fs::remove_file(&stop_file);
 
     // Stop capture — this drops the sender, signaling the encoder to finalize.
     tracing::info!("stopping capture...");
@@ -350,6 +334,11 @@ pub fn record(
         .map_err(|_| "encoder thread panicked")??;
 
     tracing::info!("GIF saved to {}", config.output_path.display());
+
+    // Copy to clipboard if enabled.
+    if settings.general.copy_to_clipboard {
+        copy_to_clipboard(&config.output_path);
+    }
 
     // Show a notification window so the user knows where the file was saved.
     rugif_ui::notification::show_save_notification(&config.output_path);

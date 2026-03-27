@@ -107,6 +107,10 @@ impl eframe::App for SettingsApp {
                     &mut self.settings.general.notify_on_save,
                     "Show notification when GIF is saved",
                 );
+                ui.checkbox(
+                    &mut self.settings.general.copy_to_clipboard,
+                    "Copy GIF to clipboard after saving",
+                );
             });
 
             ui.add_space(16.0);

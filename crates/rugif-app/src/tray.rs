@@ -1,8 +1,19 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use ksni::menu::{MenuItem, StandardItem};
-use ksni::{Tray, TrayMethods};
+use ksni::{Handle, Tray, TrayMethods};
+
+/// Shared state between the tray and the recording subprocess.
+struct RecordingState {
+    /// True while a recording subprocess is running.
+    is_recording: AtomicBool,
+    /// When the current recording started.
+    started_at: std::sync::Mutex<Option<Instant>>,
+    /// Path to the stop signal file — writing to this stops the recording.
+    stop_file: std::sync::Mutex<Option<std::path::PathBuf>>,
+}
 
 /// Embedded PNG icon, decoded to ARGB32 network byte order for ksni.
 fn tray_icon() -> ksni::Icon {
@@ -30,6 +41,7 @@ fn tray_icon() -> ksni::Icon {
 
 struct RugifTray {
     quit_flag: Arc<AtomicBool>,
+    recording: Arc<RecordingState>,
 }
 
 impl Tray for RugifTray {
@@ -38,7 +50,18 @@ impl Tray for RugifTray {
     }
 
     fn title(&self) -> String {
-        "rugif".into()
+        if self.recording.is_recording.load(Ordering::Relaxed) {
+            let elapsed = self
+                .recording
+                .started_at
+                .lock()
+                .unwrap()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            format!("rugif - Recording {:02}:{:02}", elapsed / 60, elapsed % 60)
+        } else {
+            "rugif".into()
+        }
     }
 
     fn icon_name(&self) -> String {
@@ -50,44 +73,116 @@ impl Tray for RugifTray {
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        ksni::ToolTip {
-            title: "rugif - GIF Recorder".into(),
-            description: "Click to record a GIF".into(),
-            ..Default::default()
+        if self.recording.is_recording.load(Ordering::Relaxed) {
+            ksni::ToolTip {
+                title: "rugif - Recording...".into(),
+                description: "Click to stop recording".into(),
+                ..Default::default()
+            }
+        } else {
+            ksni::ToolTip {
+                title: "rugif - GIF Recorder".into(),
+                description: "Right-click for options".into(),
+                ..Default::default()
+            }
+        }
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Left-click: stop recording if active, otherwise start one.
+        if self.recording.is_recording.load(Ordering::Relaxed) {
+            stop_recording(&self.recording);
+        } else {
+            start_recording(&self.recording);
         }
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit_flag = self.quit_flag.clone();
-        vec![
-            StandardItem {
-                label: "Record GIF".into(),
-                activate: Box::new(|_| spawn_rugif(&[])),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Settings".into(),
-                activate: Box::new(|_| spawn_rugif(&["--settings"])),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Quit".into(),
-                activate: Box::new(move |_| {
-                    quit_flag.store(true, Ordering::Relaxed);
-                }),
-                ..Default::default()
-            }
-            .into(),
-        ]
+
+        if self.recording.is_recording.load(Ordering::Relaxed) {
+            let elapsed = self
+                .recording
+                .started_at
+                .lock()
+                .unwrap()
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+
+            vec![
+                StandardItem {
+                    label: format!(
+                        "Stop Recording ({:02}:{:02})",
+                        elapsed / 60,
+                        elapsed % 60
+                    ),
+                    activate: Box::new(|tray: &mut Self| {
+                        stop_recording(&tray.recording);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            ]
+        } else {
+            vec![
+                StandardItem {
+                    label: "Record GIF".into(),
+                    activate: Box::new(|tray: &mut Self| {
+                        start_recording(&tray.recording);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                MenuItem::Separator,
+                StandardItem {
+                    label: "Settings".into(),
+                    activate: Box::new(|_| spawn_rugif(&["--settings"])),
+                    ..Default::default()
+                }
+                .into(),
+                MenuItem::Separator,
+                StandardItem {
+                    label: "Quit".into(),
+                    activate: Box::new(move |_| {
+                        quit_flag.store(true, Ordering::Relaxed);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            ]
+        }
     }
 }
 
+fn start_recording(state: &Arc<RecordingState>) {
+    if state.is_recording.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let stop_file = std::env::temp_dir().join(format!(
+        "rugif_tray_stop_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&stop_file);
+
+    *state.stop_file.lock().unwrap() = Some(stop_file.clone());
+    *state.started_at.lock().unwrap() = Some(Instant::now());
+    state.is_recording.store(true, Ordering::Relaxed);
+
+    // Pass the stop file path so the recording subprocess watches it.
+    let stop_path_str = stop_file.to_string_lossy().to_string();
+    spawn_rugif(&["--stop-file", &stop_path_str]);
+}
+
+fn stop_recording(state: &Arc<RecordingState>) {
+    if let Some(ref stop_file) = *state.stop_file.lock().unwrap() {
+        let _ = std::fs::write(stop_file, "stop");
+    }
+    state.is_recording.store(false, Ordering::Relaxed);
+    *state.started_at.lock().unwrap() = None;
+}
+
 /// Spawn `rugif` as a subprocess with the given args.
-/// Each invocation gets a clean process — no winit event loop conflicts.
 fn spawn_rugif(args: &[&str]) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "rugif".into());
     match std::process::Command::new(&exe).args(args).spawn() {
@@ -99,9 +194,15 @@ fn spawn_rugif(args: &[&str]) {
 /// Run rugif in system tray mode. Blocks until the user quits.
 pub fn run_tray() -> Result<(), Box<dyn std::error::Error>> {
     let quit_flag = Arc::new(AtomicBool::new(false));
+    let recording = Arc::new(RecordingState {
+        is_recording: AtomicBool::new(false),
+        started_at: std::sync::Mutex::new(None),
+        stop_file: std::sync::Mutex::new(None),
+    });
 
     let tray = RugifTray {
         quit_flag: quit_flag.clone(),
+        recording: recording.clone(),
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -109,13 +210,19 @@ pub fn run_tray() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     rt.block_on(async {
-        let _handle = tray.spawn().await?;
+        let handle: Handle<RugifTray> = tray.spawn().await?;
         tracing::info!("tray mode started — right-click the tray icon for options");
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
             if quit_flag.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // Update tray title/menu while recording (shows elapsed time).
+            if recording.is_recording.load(Ordering::Relaxed) {
+                handle.update(|_| {}).await;
             }
         }
 

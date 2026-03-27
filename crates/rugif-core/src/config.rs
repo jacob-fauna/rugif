@@ -43,6 +43,8 @@ pub struct GeneralSettings {
     pub start_minimized: bool,
     /// Show a notification when GIF is saved.
     pub notify_on_save: bool,
+    /// Copy GIF to clipboard after saving.
+    pub copy_to_clipboard: bool,
 }
 
 impl Default for Settings {
@@ -81,6 +83,7 @@ impl Default for GeneralSettings {
             start_on_login: false,
             start_minimized: true,
             notify_on_save: true,
+            copy_to_clipboard: true,
         }
     }
 }
