@@ -15,11 +15,9 @@ struct RecordingState {
     stop_file: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
-/// Embedded PNG icon, decoded to ARGB32 network byte order for ksni.
-fn tray_icon() -> ksni::Icon {
-    static ICON_PNG: &[u8] = include_bytes!("../../../assets/rugif.png");
-
-    let img = image::load_from_memory_with_format(ICON_PNG, image::ImageFormat::Png)
+/// Decode an embedded PNG to ARGB32 network byte order for ksni.
+fn png_to_ksni_icon(png_data: &[u8]) -> ksni::Icon {
+    let img = image::load_from_memory_with_format(png_data, image::ImageFormat::Png)
         .expect("failed to decode embedded icon")
         .to_rgba8();
 
@@ -37,6 +35,16 @@ fn tray_icon() -> ksni::Icon {
         height,
         data: argb,
     }
+}
+
+fn default_icon() -> ksni::Icon {
+    static PNG: &[u8] = include_bytes!("../../../assets/rugif.png");
+    png_to_ksni_icon(PNG)
+}
+
+fn recording_icon() -> ksni::Icon {
+    static PNG: &[u8] = include_bytes!("../../../assets/rugif_recording.png");
+    png_to_ksni_icon(PNG)
 }
 
 struct RugifTray {
@@ -69,7 +77,11 @@ impl Tray for RugifTray {
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        vec![tray_icon()]
+        if self.recording.is_recording.load(Ordering::Relaxed) {
+            vec![recording_icon()]
+        } else {
+            vec![default_icon()]
+        }
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {

@@ -169,35 +169,33 @@ fn chrono_timestamp() -> String {
 }
 
 fn copy_to_clipboard(path: &std::path::Path) {
-    // Try wl-copy (Wayland) first, then xclip (X11).
-    let gif_data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("clipboard: failed to read GIF: {e}");
-            return;
-        }
-    };
+    use std::io::Write;
 
+    let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let file_uri = format!("file://{}\n", abs_path.display());
+
+    // Copy as a file URI (text/uri-list) — this is what file managers use
+    // when you Ctrl+C a file. Web apps like GitHub accept it for upload.
     let result = std::process::Command::new("wl-copy")
         .arg("--type")
-        .arg("image/gif")
+        .arg("text/uri-list")
         .stdin(std::process::Stdio::piped())
         .spawn()
         .or_else(|_| {
             std::process::Command::new("xclip")
-                .args(["-selection", "clipboard", "-t", "image/gif"])
+                .args(["-selection", "clipboard", "-t", "text/uri-list"])
                 .stdin(std::process::Stdio::piped())
                 .spawn()
         });
 
     match result {
         Ok(mut child) => {
-            use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(&gif_data);
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(file_uri.as_bytes());
+                drop(stdin);
             }
             let _ = child.wait();
-            tracing::info!("copied GIF to clipboard");
+            tracing::info!("copied to clipboard: {}", abs_path.display());
         }
         Err(_) => {
             tracing::warn!("clipboard: wl-copy and xclip not found, skipping");

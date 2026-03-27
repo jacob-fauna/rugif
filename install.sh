@@ -35,6 +35,11 @@ if ! pkg-config --exists libclang 2>/dev/null && ! dpkg -s libclang-dev &>/dev/n
   missing_libs+=("libclang-dev")
 fi
 
+# wl-copy is needed for clipboard support on Wayland
+if ! command -v wl-copy &>/dev/null && ! command -v xclip &>/dev/null; then
+  missing_libs+=("wl-clipboard")
+fi
+
 if [ ${#missing_libs[@]} -gt 0 ]; then
   echo
   echo "Missing system libraries: ${missing_libs[*]}"
