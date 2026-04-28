@@ -2,6 +2,7 @@ pub mod controls;
 pub mod notification;
 pub mod selection;
 pub mod settings;
+pub mod trim;
 
 /// Create NativeOptions that allow running the event loop from any thread.
 /// Required when launching egui windows from tray callbacks or worker threads.

@@ -45,6 +45,8 @@ pub struct GeneralSettings {
     pub notify_on_save: bool,
     /// Copy GIF to clipboard after saving.
     pub copy_to_clipboard: bool,
+    /// After recording, open a window to trim the start/end before encoding.
+    pub show_trim_ui: bool,
 }
 
 impl Default for Settings {
@@ -84,6 +86,7 @@ impl Default for GeneralSettings {
             start_minimized: true,
             notify_on_save: true,
             copy_to_clipboard: true,
+            show_trim_ui: true,
         }
     }
 }

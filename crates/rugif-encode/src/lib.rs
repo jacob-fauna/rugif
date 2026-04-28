@@ -62,19 +62,11 @@ pub fn encode_gif(
     });
 
     // Feed frames from the capture channel into the collector.
-    // Skip the first ~0.5s of frames to avoid window transition artifacts.
-    let skip_frames = (fps as usize / 2).max(1);
     let frame_duration = 1.0 / fps as f64;
     let start_time = Instant::now();
     let mut frame_index: usize = 0;
-    let mut total_received: usize = 0;
 
     for frame in receiver {
-        total_received += 1;
-        if total_received <= skip_frames {
-            continue;
-        }
-
         let presentation_timestamp = frame_index as f64 * frame_duration;
         let pixels = rgba_bytes_to_pixels(&frame.data);
 

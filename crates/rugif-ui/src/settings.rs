@@ -111,6 +111,10 @@ impl eframe::App for SettingsApp {
                     &mut self.settings.general.copy_to_clipboard,
                     "Copy GIF to clipboard after saving",
                 );
+                ui.checkbox(
+                    &mut self.settings.general.show_trim_ui,
+                    "Show trim window after recording",
+                );
             });
 
             ui.add_space(16.0);

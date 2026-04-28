@@ -290,24 +290,23 @@ pub fn record(
         config.fps
     );
 
-    let encode_fps = config.fps;
-    let encode_quality = config.quality;
-    let output_path = config.output_path.clone();
-    let width = region.width;
-    let height = region.height;
-
-    // Run encoder on a separate thread.
-    let encode_handle = thread::spawn(move || {
-        rugif_encode::encode_gif(receiver, &output_path, encode_fps, encode_quality, width, height)
-    });
-
-    // Wait for stop signal: either the tray writes the stop file, or max
-    // duration is reached. If no stop file was provided (direct CLI mode),
-    // just wait for max duration.
+    // Drain frames into an in-memory buffer while waiting for the stop signal.
+    // Buffering (rather than encoding live) is what makes the post-capture
+    // trim UI possible without a re-decode round-trip.
     let max_dur = Duration::from_secs(config.max_duration_secs as u64);
     let deadline = Instant::now() + max_dur;
+    let mut frames: Vec<rugif_core::CaptureFrame> = Vec::new();
 
-    loop {
+    'capture: loop {
+        // Drain any frames that have arrived since the last poll.
+        loop {
+            match receiver.try_recv() {
+                Ok(f) => frames.push(f),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break 'capture,
+            }
+        }
+
         if let Some(sf) = stop_file {
             if sf.exists() {
                 let _ = std::fs::remove_file(sf);
@@ -321,12 +320,61 @@ pub fn record(
         thread::sleep(Duration::from_millis(50));
     }
 
-    // Stop capture — this drops the sender, signaling the encoder to finalize.
     tracing::info!("stopping capture...");
     capture.stop_capture()?;
-    tracing::info!("capture stopped, waiting for GIF encoding to finish...");
 
-    // Wait for encoder to finish (gifski may take a while for high-quality encoding).
+    // Drain anything still in flight after stop.
+    while let Ok(f) = receiver.try_recv() {
+        frames.push(f);
+    }
+    tracing::info!("captured {} frames", frames.len());
+
+    if frames.is_empty() {
+        tracing::warn!("no frames captured — nothing to encode");
+        return Ok(());
+    }
+
+    // Optional trim step: let the user pick a sub-range to encode.
+    let range = if settings.general.show_trim_ui && frames.len() > 1 {
+        match rugif_ui::trim::show_trim_dialog(&frames, config.fps) {
+            Ok(rugif_ui::trim::TrimResult::Save(r)) => r,
+            Ok(rugif_ui::trim::TrimResult::Cancel) => {
+                tracing::info!("recording discarded by user");
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("trim UI error: {e} — encoding full recording");
+                0..frames.len()
+            }
+        }
+    } else {
+        0..frames.len()
+    };
+
+    // Drain the selected slice out of `frames` so we don't hold two copies.
+    let selected: Vec<rugif_core::CaptureFrame> = frames.drain(range).collect();
+    drop(frames);
+    tracing::info!("encoding {} selected frames", selected.len());
+
+    // Pipe the selected frames through the existing streaming gifski encoder.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<rugif_core::CaptureFrame>(30);
+    let encode_fps = config.fps;
+    let encode_quality = config.quality;
+    let output_path = config.output_path.clone();
+    let width = region.width;
+    let height = region.height;
+
+    let encode_handle = thread::spawn(move || {
+        rugif_encode::encode_gif(rx, &output_path, encode_fps, encode_quality, width, height)
+    });
+
+    for frame in selected {
+        if tx.send(frame).is_err() {
+            break;
+        }
+    }
+    drop(tx);
+
     encode_handle
         .join()
         .map_err(|_| "encoder thread panicked")??;
